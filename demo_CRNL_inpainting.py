@@ -22,13 +22,6 @@ def main():
     p = 6; k = 30;
     
     '''
-    # for hyperspectral data
-    max_iter = 15001
-    omega_0_4D = 12
-    down_2 = [1,1,3,5]    
-    lr_real = 0.0002
-    gamma = 10e-6
-    p = 6; k = 20;
     
     # for video data
     max_iter = 3001
