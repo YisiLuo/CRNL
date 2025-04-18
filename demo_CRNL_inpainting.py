@@ -12,7 +12,7 @@ from utils_patch import *
 def main():
     
     # for color image:
-    data = "data/peppers"
+    data = "peppers"
     c = "2"
     max_iter = 401
     omega_0_4D = 2
@@ -56,7 +56,108 @@ def main():
     mat = scipy.io.loadmat(file_name)
     gt_np = mat["Ohsi"][:,:,:]
     
-    file_name = data+'p'+c+'TCTV.mat'
+    
+    ##############################
+    # Initialization using an INR
+    omega = 2
+    class SineLayer(nn.Module):
+        def __init__(self, in_features, out_features, bias=True,
+                     is_first=False, omega_0=omega): 
+            super().__init__()
+            self.omega_0 = omega_0
+            self.is_first = is_first
+            self.in_features = in_features
+            self.linear = nn.Linear(in_features, out_features, bias=bias)
+            self.init_weights()
+        
+        def init_weights(self):
+            with torch.no_grad():
+                if self.is_first:
+                    self.linear.weight.uniform_(-1 / self.in_features, 
+                                                 1 / self.in_features)      
+                else:
+                    self.linear.weight.uniform_(-np.sqrt(6 / self.in_features) / self.omega_0, 
+                                                 np.sqrt(6 / self.in_features) / self.omega_0)
+            
+        def forward(self, input):
+            return torch.sin(self.omega_0 * self.linear(input))
+    
+    class Network_3D(nn.Module):
+        def __init__(self, r_1,r_2,r_3):
+            super(Network_3D, self).__init__()
+            mid_channel = 200
+            self.U_net = nn.Sequential(SineLayer(1, mid_channel, is_first=True),
+                                       SineLayer(mid_channel, mid_channel, is_first=True),
+                                       nn.Linear(mid_channel, r_1))
+            
+            self.V_net = nn.Sequential(SineLayer(1, mid_channel, is_first=True),
+                                       SineLayer(mid_channel, mid_channel, is_first=True),
+                                       nn.Linear(mid_channel, r_2))
+            
+            self.W_net = nn.Sequential(SineLayer(1, mid_channel, is_first=True),
+                                       SineLayer(mid_channel, mid_channel, is_first=True),
+                                       nn.Linear(mid_channel, r_3))
+    
+        def forward(self, centre, U_input, V_input, W_input):
+            U = self.U_net(U_input)
+            V = self.V_net(V_input)
+            W = self.W_net(W_input)
+            
+            centre = centre.permute(1,2,0) 
+            centre = centre @ U.t()
+            centre = centre.permute(2,1,0) 
+            centre = centre @ V.t()
+            centre = centre.permute(0,2,1) 
+            centre = centre @ W.t()
+            return centre
+        
+    mask = torch.ones(X.shape).type(dtype)
+    mask[X == 0] = 0 
+    X[mask == 0] = 0
+    
+    r_1,r_2,r_3=n_1,n_2,5
+    
+    centre = torch.Tensor(r_1,r_2,r_3).type(dtype)
+    stdv = 1 / math.sqrt(centre.size(0))
+    centre.data.uniform_(-stdv, stdv)
+    U_input = torch.from_numpy(np.array(range(1,n_1+1))).reshape(n_1,1).type(dtype)
+    V_input = torch.from_numpy(np.array(range(1,n_2+1))).reshape(n_2,1).type(dtype)
+    W_input = torch.from_numpy(np.array(range(1,n_3+1))).reshape(n_3,1).type(dtype)
+        
+    model_INR = Network_3D(r_1,r_2,r_3).type(dtype)
+    
+    params = []
+    params += [x for x in model_INR.parameters()]
+    centre.requires_grad=True
+    params += [centre]
+    optimizier = optim.Adam(params, lr=10*lr_real)
+    
+    for iter in range(2000):
+        
+        X_Out = model_INR(centre, U_input, V_input, W_input)
+        
+        loss = torch.norm(X_Out*mask-X*mask,2)
+        
+        loss = loss + 10*gamma * torch.norm(X_Out[1:,:,:]-X_Out[:-1,:,:], 1)
+        loss = loss + 10*gamma * torch.norm(X_Out[:,1:,:]-X_Out[:,:-1,:], 1)
+
+        optimizier.zero_grad()
+        loss.backward()
+        optimizier.step()
+
+        if iter % 100 == 0:
+            X_Out[mask == 1] = X[mask == 1].clone()
+            
+            print('iteration:',iter)
+            
+            scipy.io.savemat(data+'p'+c+'INR'+'.mat',{
+                'clean_image': np.clip(X_Out.cpu().detach().numpy(),0,1)})
+              
+    
+    ##############################
+    
+    
+    file_name = data+'p'+c+'INR.mat'
     mat = scipy.io.loadmat(file_name)
     com_np = mat["clean_image"][:,:,:]
     com = torch.from_numpy(com_np).type(dtype).cuda()
@@ -196,34 +297,29 @@ def main():
         loss.backward()
         optimizier.step()
 
-        if iter % 100 == 0:
+        if iter % 50 == 0:
             X_Out_real[mask == 1] = X[mask == 1].clone()
             
             X_Out_real = X_Out_real[0:n1_real,0:n2_real,:].clone()
             ps = psnr3d(gt_np, X_Out_real.cpu().detach().numpy())
             
-            print('iteration:',iter,'CRNL PSNR',ps,'TCTV PSNR:',ps_com)
+            print('iteration:',iter,'CRNL PSNR',ps)
             
             
             plt.figure(figsize=(15,45))
             
-            plt.subplot(131)
+            plt.subplot(121)
             plt.imshow(np.clip(np.stack((X[:,:,show[0]].cpu().detach().numpy(),
                                  X[:,:,show[1]].cpu().detach().numpy(),
                                  X[:,:,show[2]].cpu().detach().numpy()),2),0,1))
             plt.title('observed')
     
-            plt.subplot(132)
+            plt.subplot(122)
             plt.imshow(np.clip(np.stack((X_Out_real[:,:,show[0]].cpu().detach().numpy(),
                                  X_Out_real[:,:,show[1]].cpu().detach().numpy(),
                                  X_Out_real[:,:,show[2]].cpu().detach().numpy()),2),0,1))
             plt.title('CRNL')
             
-            plt.subplot(133)
-            plt.imshow(np.clip(np.stack((X_Out[:,:,show[0]].cpu().detach().numpy(),
-                                 X_Out[:,:,show[1]].cpu().detach().numpy(),
-                                 X_Out[:,:,show[2]].cpu().detach().numpy()),2),0,1))
-            plt.title('TCTV')
             plt.show()
                 
                 
